@@ -536,6 +536,30 @@ struct shape_record {
   constexpr shape_record(bool forw, int i, float x, float slope): forward(forw), i(i), x(x), slope(slope) {}
 };
 
+struct path_point {
+  float x;
+  float y;
+  path_point* prev {};
+  path_point* next {};
+
+  constexpr path_point(float x, float y):
+    x(x), y(y) {}
+};
+
+constexpr float hslope(const path_point& a, const path_point& b) {
+  auto h = b.y - a.y;
+  return (b.x - a.x) / (h ? h : 1.f);
+}
+
+struct active_path_record {
+  const path_point* pt;
+  const path_point* ant;
+  float x;
+  float slope;
+  constexpr active_path_record(const path_point& pt, const path_point& ant):
+    pt(&pt), ant(&ant), x(pt.x), slope(hslope(pt, ant)) {}
+};
+
 void spreadTopPoint(const array<point>& shape, int top, vector<shape_record>& trails, int ins_pt) {
   auto i = trails.insert(trails.begin() + ins_pt, 2lu, shape_record());
   auto& first = *i;
@@ -556,6 +580,13 @@ void spreadTopPoint(const array<point>& shape, int top, vector<shape_record>& tr
     first  = shape_record(true, top, shape[top].x, sn);
     second = shape_record(false, top, shape[top].x, sp);
   }
+}
+
+void spreadTopPoint(const path_point& top, vector<active_path_record>& trails, int ins_pt) {
+  active_path_record nu[2] {{top, *top.next}, {top, *top.prev}};
+  if (nu[1].slope < nu[0].slope)
+    swap(nu[0], nu[1]);
+  trails.insert(trails.begin() + ins_pt, nu, nu + 2);
 }
 
 int main() {
@@ -618,25 +649,70 @@ int main() {
     color col {0x4400ccff};
     rng.seed(system_clock::now().time_since_epoch().count());
 
-    array<point> shape;
-    array<int> ind;
-    constexpr auto npts = 100;
+    array<point> shap;
+    array<point> shap2;
+    constexpr auto npts = 50;
     for (auto i: range(npts)) {
       auto t = 6.28f * i / npts;
-      shape.push(300 + 100 * cos(t), 100 - 40 * sin(t) + 40 * cos(2 * t) );
-      ind.push(i);
+      shap.push(300 + 100 * cos(t), 100 - 40 * sin(t) + 40 * cos(2 * t));
+      shap2.push(300 + 25 * cos(t), 60 - 10 * sin(t));
     }
 
-    sort(ind.begin(), ind.end(), [&shape](int i, int j){ return shape[i].y < shape[j].y; });
 
-    vector<shape_record> trails;
+    // Create copy of paths will link information.
+    vector<path_point> shape;
+    shape.reserve(shap.size() + shap2.size());
+    {
+    int front = shape.size();
+    for (auto& s: shap)
+      shape.emplace_back(s.x, s.y);
+    int back = shape.size() - 1;
+    cerr << front << ' ' << back << endl;
+    shape[front].prev = &shape[back];
+    shape[back].next = &shape[front];
+    for (auto i: range(front, back)) {
+      shape[i + 1].prev = &shape[i];
+      shape[i].next = &shape[i + 1];
+    }
+    }
 
-    auto top = ind[0];
-    auto y0 = shape[top].y;
-    spreadTopPoint(shape, top, trails, 0);
+    {
+    int front = shape.size();
+    for (auto& s: shap2)
+      shape.emplace_back(s.x, s.y);
+    int back = shape.size() - 1;
+    cerr << front << ' ' << back << endl;
+    shape[front].prev = &shape[back];
+    shape[back].next = &shape[front];
+    for (auto i: range(front, back)) {
+      shape[i + 1].prev = &shape[i];
+      shape[i].next = &shape[i + 1];
+    }
+    }
+
+    array<int> ind;
+    for (auto i: range(shape.size()))
+      ind.push(i);
+    sort(ind.begin(), ind.end(), [&shape](int a, int b){ return shape[a].y < shape[b].y; });
+
+    for (auto& s: shape) {
+      assert(s.next->prev == &s);
+      assert(s.prev->next == &s);
+    }
+
+    vector<active_path_record> trails;
+
+    auto& top = shape[ind[0]];
+    auto y0 = top.y;
+    cerr << "top " << (&top - &shape[0]) << ' ' << top.x << ' ' << top.y << endl;
+    cerr << top.next << ' ' <<  top.prev << endl;
+    cerr << top.next->next << ' ' <<  top.next->prev << endl;
+    cerr << top.prev->next << ' ' <<  top.prev->prev << endl;
+    spreadTopPoint(top, trails, 0);
 
     for (auto i: range(1, ind.size())) {
-      float y1 = shape[ind[i]].y;
+      auto& p = shape[ind[i]]; // new point
+      float y1 = p.y;
 
       // Draw all the current segments.
       for (auto j: range(0, trails.size(), 2)) {
@@ -645,14 +721,8 @@ int main() {
         trails[j+1].x += trails[j+1].slope * (y1 - y0);
       }
 
-      auto p = ind[i]; // new point index.
-    
-      // If new point was anticipated, it just updates state. Update state.
-      auto pprev = (p + shape.size() - 1) % shape.size();
-      auto pnext = (p + 1) % shape.size();
-
-      auto pti = std::find_if(trails.begin(), trails.end(), [pprev](shape_record& r){ return r.forward && r.i == pprev; });
-      auto nti = std::find_if(trails.begin(), trails.end(), [pnext](shape_record& r){ return !r.forward && r.i == pnext; });
+      auto pti = std::find_if(trails.begin(), trails.end(), [p = &p](active_path_record& r){ return r.pt == p->prev && r.ant == p; });
+      auto nti = std::find_if(trails.begin(), trails.end(), [p = &p](active_path_record& r){ return r.pt == p->next && r.ant == p; });
 
       if (pti != trails.end() && nti != trails.end()) {
         // If both our neighbors have trails, remove them both.
@@ -660,24 +730,20 @@ int main() {
         auto mi = min(pti, nti);
         trails.erase(mi, mi + 2);
       } else if (pti != trails.end()) {
-        auto h = shape[pnext].y - shape[p].y;
-        auto s = (shape[pnext].x - shape[p].x) / (h ? h : 1.f);
-        pti->i = p;
-        pti->x = shape[p].x;
-        pti->slope = s;
+        *pti = active_path_record(p, *p.next);
       } else if (nti != trails.end()) {
-        auto h = shape[pprev].y - shape[p].y;
-        auto s = (shape[pprev].x - shape[p].x) / (h ? h : 1.f);
-        nti->i = p;
-        nti->x = shape[p].x;
-        nti->slope = s;
+        *nti = active_path_record(p, *p.prev);
       } else {
+        cerr << "new point! " << (&p - &shape[0]) << endl;
+        cerr << "p.x " << p.x << endl;
+        cerr << "p.y " << p.y << endl;
         // Search through which segment it is in between.
-        auto sr = shape_record(false, -1, shape[p].x, 0.f);
-        auto ii = std::lower_bound(trails.begin(), trails.end(), sr, [](const shape_record& a, const shape_record& b){
+        auto sr = active_path_record(p, p);
+        auto ii = std::lower_bound(trails.begin(), trails.end(), sr, [](const active_path_record& a, const active_path_record& b){
           return a.x < b.x;
         });
-        spreadTopPoint(shape, p, trails, ii - trails.begin());
+        cerr << "ii " << ii - trails.begin() << endl;
+        spreadTopPoint(p, trails, ii - trails.begin());
       }
 
       // Move down.
