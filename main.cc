@@ -2,7 +2,11 @@
 #include <tb/array.hh>
 #include <tb/util/range.hh>
 
+#include "common.hh"
+#include "png.hh"
+
 #include <stdlib.h>
+#include <fstream>
 #include <stdio.h>
 #include <cassert>
 #include <algorithm>
@@ -11,8 +15,11 @@
 #include <random>
 #include <chrono>
 #include <vector>
+#include <array>
+#include <optional>
 
 using namespace tb;
+using std::optional;
 using std::cerr;
 using std::chrono::system_clock;
 using std::clamp;
@@ -25,11 +32,74 @@ using std::sort;
 using std::swap;
 using std::vector;
 
-struct ppm_pixel {
-  unsigned char* data;
-  auto& r() const { return data[0]; }
-  auto& g() const { return data[1]; }
-  auto& b() const { return data[2]; }
+using tbf::buffer;
+using tbf::buffer_view;
+using tbf::u8;
+using tbf::u32;
+using tbf::uninitialized;
+
+struct rgb { u8 r, g, b; };
+
+struct rgba {
+  u8 r, g, b, a;
+  rgba(u8 r, u8 g, u8 b, u8 a): r(r), g(g), b(b), a(a) {}
+  rgba(u32 rgba):
+    r(rgba >> 24),
+    g(rgba >> 16),
+    b(rgba >> 8),
+    a(rgba >> 0) {}
+};
+
+class rgb_reference {
+  u8 const* data_;
+public:
+  rgb_reference(u8 const* data): data_(data) {}
+  auto r() const -> u8 const& { return data_[0]; }
+  auto g() const -> u8 const& { return data_[1]; }
+  auto b() const -> u8 const& { return data_[2]; }
+  rgb_reference& operator=(rgb_reference other) = delete;
+};
+
+class mutable_rgb_reference {
+  u8* data_;
+public:
+  mutable_rgb_reference(u8* data): data_(data) {}
+  auto r() const -> u8& { return data_[0]; }
+  auto g() const -> u8& { return data_[1]; }
+  auto b() const -> u8& { return data_[2]; }
+  mutable_rgb_reference& operator=(mutable_rgb_reference other) = delete;
+  auto operator=(rgb x) -> mutable_rgb_reference {
+    r() = x.r; g() = x.g; b() = x.b;
+    return *this;
+  }
+};
+
+class rgba_reference {
+  u8 const* data_;
+public:
+  rgba_reference(u8 const* data): data_(data) {}
+  auto r() const -> u8 const& { return data_[0]; }
+  auto g() const -> u8 const& { return data_[1]; }
+  auto b() const -> u8 const& { return data_[2]; }
+  auto a() const -> u8 const& { return data_[3]; }
+  rgba_reference& operator=(rgba_reference other) = delete;
+};
+
+class mutable_rgba_reference {
+  u8* data_;
+public:
+  mutable_rgba_reference(u8* data): data_(data) {}
+  auto r() const -> u8& { return data_[0]; }
+  auto g() const -> u8& { return data_[1]; }
+  auto b() const -> u8& { return data_[2]; }
+  auto a() const -> u8& { return data_[3]; }
+  auto operator=(rgba x) -> mutable_rgba_reference {
+    r() = x.r; g() = x.g; b() = x.b; a() = x.a;
+    return *this;
+  }
+  operator rgba() const {
+    return {r(), g(), b(), a()};
+  }
 };
 
 /** Pixel image saved in a PPM file. */
@@ -51,46 +121,44 @@ struct ppm_image {
     sprintf(reinterpret_cast<char*>(buf.base()), "P6 %8d %7d 255\n", w, h);
   }
 
-  auto operator()(unsigned int i, unsigned int j) {
-    return ppm_pixel {
-      reinterpret_cast<unsigned char*>(buf.base() + 24 + 3 * (i * w_ + j))
-    };
+  auto operator()(u32 i, u32 j) -> mutable_rgba_reference {
+    return reinterpret_cast<unsigned char*>(buf.base() + 24 + 3 * (i * w_ + j));
   }
 
   constexpr auto width() const { return w_; }
   constexpr auto height() const { return h_; }
 };
 
-struct color {
-  uint8_t r;
-  uint8_t g;
-  uint8_t b;
-  uint8_t a;
+// struct color {
+//   uint8_t r;
+//   uint8_t g;
+//   uint8_t b;
+//   uint8_t a;
 
-  color(uint32_t rgba):
-    r {static_cast<uint8_t>(rgba >> 24)},
-    g {static_cast<uint8_t>(rgba >> 16)},
-    b {static_cast<uint8_t>(rgba >> 8)},
-    a {static_cast<uint8_t>(rgba >> 0)} {}
+//   color(uint32_t rgba):
+//     r {static_cast<uint8_t>(rgba >> 24)},
+//     g {static_cast<uint8_t>(rgba >> 16)},
+//     b {static_cast<uint8_t>(rgba >> 8)},
+//     a {static_cast<uint8_t>(rgba >> 0)} {}
 
-  color(uint8_t r, uint8_t g, uint8_t b, uint8_t a):
-    r {r}, g {g}, b {b}, a {a} {}
-};
+//   color(uint8_t r, uint8_t g, uint8_t b, uint8_t a):
+//     r {r}, g {g}, b {b}, a {a} {}
+// };
 
-struct pixel {
-  unsigned char* data;
-  auto& r() const { return data[0]; }
-  auto& g() const { return data[1]; }
-  auto& b() const { return data[2]; }
-  auto& a() const { return data[3]; }
-};
+// struct pixel {
+//   unsigned char* data;
+//   auto& r() const { return data[0]; }
+//   auto& g() const { return data[1]; }
+//   auto& b() const { return data[2]; }
+//   auto& a() const { return data[3]; }
+// };
 
-color col(pixel p) {
-  return {p.r(), p.g(), p.b(), p.a()};
-}
+// rgba col(pixel p) {
+//   return {p.r(), p.g(), p.b(), p.a()};
+// }
 
 /** Saturating add a color to a pixel. */
-void operator+=(pixel p, color c) {
+void operator+=(mutable_rgba_reference p, rgba c) {
   p.r() = min(255, p.r() + c.r);
   p.g() = min(255, p.g() + c.g);
   p.b() = min(255, p.b() + c.b);
@@ -105,8 +173,8 @@ struct layer {
 
   layer(unsigned int h, unsigned int w):
     data {new unsigned char[4 * h * w]()},
-    h_ {h},
-    w_ {w} {}
+    w_ {w},
+    h_ {h} {}
 
   layer(const layer&) = delete;
   layer(layer&&) = default;
@@ -119,10 +187,10 @@ struct layer {
   constexpr auto width() const { return w_; }
   constexpr auto height() const { return h_; }
 
-  auto operator()(unsigned int i, unsigned int j) {
+  auto operator()(u32 i, u32 j) -> mutable_rgba_reference {
     assert(i < height());
     assert(j < width());
-    return pixel {data + 4 * (i * w_ + j)};
+    return data + 4 * (i * w_ + j);
   }
 };
 
@@ -152,7 +220,7 @@ point join(line a, line b) {
   return {i * k, j * k};
 }
 
-void fill_sample(ppm_image& im, unsigned int x, unsigned int y, color c = 0xff0000ff) {
+void fill_sample(ppm_image& im, unsigned int x, unsigned int y, rgba c = 0xff0000ff) {
   if (x >= im.width() || y >= im.height()) return;
   auto px = im(y, x);
 
@@ -172,7 +240,7 @@ void fill_sample(ppm_image& im, unsigned int x, unsigned int y, color c = 0xff00
 	// sample_buffer[4 * (x + y * w) + 3] = Ea_;
 }
 
-void cover(layer& l, unsigned int i, unsigned int j, color c) {
+void cover(layer& l, unsigned int i, unsigned int j, rgba c) {
   l(i, j) += c;
 }
 
@@ -186,11 +254,15 @@ float partialArea(float s0, float s1, float x0, float x1) {
   return area;
 }
 
-auto fade(color c, float a) {
-  return color(c.r * a, c.g * a, c.b * a, c.a * a);
+// static auto fade(rgba c, u8 a) -> rgba {
+//   return rgba(c.r * a / 255, c.g * a / 255, c.b * a / 255, c.a * a / 256);
+// }
+
+static auto fade(rgba c, float a) -> rgba {
+  return rgba(c.r * a, c.g * a, c.b * a, c.a * a);
 }
 
-void asaRow(layer& l, unsigned int i, color c, float min1, float min2, float max1, float max2) {
+void asaRow(layer& l, unsigned int i, rgba c, float min1, float min2, float max1, float max2) {
   assert(min2 >= min1);
   assert(max2 >= max1);
 
@@ -240,7 +312,7 @@ static inline pair<float, float> ordered(float x, float y) {
   return {x, y};
 }
 
-void axisQuad(layer& l, float y, float x0, float x1, float sL, float sR, unsigned int imin, unsigned int imax, color c) {
+void axisQuad(layer& l, float y, float x0, float x1, float sL, float sR, unsigned int imin, unsigned int imax, rgba c) {
   auto ka = y, kb = y - 1.f, kc = ka, kd = kb;
   if (sL < 0) swap(ka, kb);
   if (sR < 0) swap(kc, kd);
@@ -255,7 +327,7 @@ void axisQuad(layer& l, float y, float x0, float x1, float sL, float sR, unsigne
   }
 }
 
-void axisTrap(layer& l, float y0, float y1, float x0, float x1, float sL, float sR, color c) {
+void axisTrap(layer& l, float y0, float y1, float x0, float x1, float sL, float sR, rgba c) {
 
   auto h = y1 - y0;
   if (h <= 0) return;
@@ -284,7 +356,7 @@ void axisTrap(layer& l, float y0, float y1, float x0, float x1, float sL, float 
 }
 
 
-void axisAlignedTriangle(layer& l, float x, float y, float sL, float sR, unsigned int imin, unsigned int imax, color c) {
+void axisAlignedTriangle(layer& l, float x, float y, float sL, float sR, unsigned int imin, unsigned int imax, rgba c) {
   auto ka = y, kb = y - 1.f, kc = ka, kd = kb;
   if (sL < 0) swap(ka, kb);
   if (sR < 0) swap(kc, kd);
@@ -298,7 +370,7 @@ void axisAlignedTriangle(layer& l, float x, float y, float sL, float sR, unsigne
   }
 }
 
-void triangle(layer& l, point a, point b, point c, color col) {
+void triangle(layer& l, point a, point b, point c, rgba col) {
   point v[3] {a, b, c};
   sort(v, v + 3, [](point a, point b){ return a.y < b.y; });
   auto [x0, y0] = v[0];
@@ -386,7 +458,7 @@ void circle(ppm_image& im, point c, float r) {
   ellipse(im, c.x, c.y, r, r);
 }
 
-void fill(ppm_image& im, color c) {
+void fill(ppm_image& im, rgba c) {
   for (auto i: range(im.height())) {
     for (auto j: range(im.width())) {
       fill_sample(im, j, i, c);
@@ -418,7 +490,7 @@ void squareLine(layer& l, float x0, float y0, float x1, float y1, float width) {
   triangle(l, {x01, y01}, {x10, y10}, {x11, y11}, 0x000000ff);
 }
 
-void buttLine(layer& l, float x0, float y0, float x1, float y1, float width, color c) {
+void buttLine(layer& l, float x0, float y0, float x1, float y1, float width, rgba c) {
   auto half = .5f * width;
   auto Tx = x1 - x0;
   auto Ty = y1 - y0;
@@ -437,7 +509,7 @@ void buttLine(layer& l, float x0, float y0, float x1, float y1, float width, col
   triangle(l, {x01, y01}, {x10, y10}, {x11, y11}, c);
 }
 
-static inline void buttLine(layer& l, point p0, point p1, float width, color c) {
+static inline void buttLine(layer& l, point p0, point p1, float width, rgba c) {
   buttLine(l, p0.x, p0.y, p1.x, p1.y, width, c);
 }
 
@@ -514,7 +586,7 @@ static inline float dist(point p0, point p1) {
   return sqrt(dx * dx + dy * dy);
 }
 
-static inline void bez(layer& l, point a, point b, point c, point d, color col) {
+static inline void bez(layer& l, point a, point b, point c, point d, rgba col) {
   auto lin_len = dist(a, b) + dist(b, c) + dist(c, d);
   auto n_seg = static_cast<unsigned int>(lin_len / 20.f);
   auto f = bezier3 {a, b, c, d};
@@ -600,7 +672,7 @@ std::ostream& operator<<(std::ostream& os, const linked_point& x) {
   return os << x.x << ' ' << x.y << ' ' << x.prev << ' ' << x.next;
 }
 
-void draw(layer& l, curve& c, const color& col) {
+void draw(layer& l, curve& c, rgba color) {
   auto y0 = 0.f;
 
   auto& shape = c.shape;
@@ -615,7 +687,7 @@ void draw(layer& l, curve& c, const color& col) {
 
     // Draw all the current segments.
     for (auto j: range(0, trails.size(), 2)) {
-      axisTrap(l, y0, y1, trails[j].x, trails[j+1].x, trails[j].slope, trails[j+1].slope, col);
+      axisTrap(l, y0, y1, trails[j].x, trails[j+1].x, trails[j].slope, trails[j+1].slope, color);
       trails[j].x += trails[j].slope * (y1 - y0);
       trails[j+1].x += trails[j+1].slope * (y1 - y0);
     }
@@ -648,7 +720,57 @@ void draw(layer& l, curve& c, const color& col) {
   }
 }
 
+static auto write_to_file(buffer_view bytes, std::string const& filename) {
+  // auto bytes = DoubleArrayToByteArray(data);
+	auto file = std::ofstream {filename.c_str(), std::ios::binary};
+	file.write(reinterpret_cast<const char*>(bytes.begin()), bytes.size());
+	file.close();
+}
+
+#include "png.hh"
+
+
+class rgba_bitmap {
+  buffer data_;
+  u32 height_;
+  u32 width_;
+public:
+  rgba_bitmap(u32 height, u32 width):
+    data_(height * width * 4, uninitialized),
+    height_(height),
+    width_(width) {}
+  auto begin() const -> rgba_reference { return data_.begin(); }
+  auto begin() -> mutable_rgba_reference { return data_.begin(); }
+  auto end() const -> rgba_reference { return data_.end(); }
+  auto end() -> mutable_rgba_reference { return data_.end(); }
+  auto data() { return data_.data(); }
+  auto data() const { return data_.data(); }
+  auto& buffer() { return data_; }
+  auto height() const { return height_; }
+  auto width() const { return width_; }
+  auto operator()(u32 row, u32 col) -> mutable_rgba_reference {
+    return data() + 4 * (row * width_ + col);
+  }
+  auto operator()(u32 row, u32 col) const -> rgba_reference {
+    return data() + 4 * (row * width_ + col);
+  }
+};
+
+static auto png_test() -> void {
+  auto red = rgba {255, 0, 0, 255};
+  auto blue = rgba {0, 0, 255, 255};
+  auto image = rgba_bitmap {100, 100};
+  for (auto i: range(100))
+    for (auto j: range(100))
+      image(i, j) = red;
+  auto pngdata = tbf::save_rgba(reinterpret_cast<tbf::byte*>(image.data()), 100, 100);
+  write_to_file(pngdata, "plot.png");
+}
+
+
 int main() {
+  png_test();
+
   constexpr auto dimx = 640;
   constexpr auto dimy = 480;
   auto im = ppm_image("first.ppm", dimx, dimy);
@@ -704,7 +826,7 @@ int main() {
   letterB(L, 120, 100);
 
   {
-    color col {0x4400ccff};
+    rgba col {0x4400ccff};
 
     array<point> shap;
     array<point> shap2;
@@ -748,26 +870,40 @@ int main() {
 
   // Let's try some bezier stuff.
   {
-  mt19937 rng;
-  rng.seed(system_clock::now().time_since_epoch().count());
-  auto a = point(rng() % dimx, rng() % dimy);
-  auto b = point(rng() % dimx, rng() % dimy);
-  auto c = point(rng() % dimx, rng() % dimy);
-  auto d = point(rng() % dimx, rng() % dimy);
+    mt19937 rng;
+    rng.seed(system_clock::now().time_since_epoch().count());
+    auto a = point(rng() % dimx, rng() % dimy);
+    auto b = point(rng() % dimx, rng() % dimy);
+    auto c = point(rng() % dimx, rng() % dimy);
+    auto d = point(rng() % dimx, rng() % dimy);
 
-  circle(im, a, 5);
-  circle(im, b, 5);
-  circle(im, c, 5);
-  circle(im, d, 5);
-  buttLine(L, a, b, 1, 0x00000088);
-  buttLine(L, c, d, 1, 0x00000088);
-  bez(L, a, b, c, d, 0x008800ff);
+    circle(im, a, 5);
+    circle(im, b, 5);
+    circle(im, c, 5);
+    circle(im, d, 5);
+    buttLine(L, a, b, 1, 0x00000088);
+    buttLine(L, c, d, 1, 0x00000088);
+    bez(L, a, b, c, d, 0x008800ff);
   }
 
   // Copy layer to output.
   for (auto i: range(dimy)) {
     for (auto j: range(dimx)) {
-      fill_sample(im, j, i, col(L(i, j)));
+      fill_sample(im, j, i, L(i, j));
     }
   }
+
+  auto for_png = rgba_bitmap(im.height(), im.width());
+  for (auto i: range(im.height())) {
+    for (auto j: range(im.width())) {
+      for_png(i, j) = {
+        im(i, j).r(),
+        im(i, j).g(),
+        im(i, j).b(),
+        255,
+      };
+    }
+  }
+  auto test24 = tbf::save_rgba(for_png.data(), for_png.height(), for_png.width());
+  write_to_file(test24, "test.png");
 }
